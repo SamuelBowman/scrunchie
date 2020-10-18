@@ -4,12 +4,13 @@ use indicatif::{ ProgressBar, ProgressIterator, ProgressStyle };
 use image;
 use image::RgbImage;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Position(u32, u32);
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct Seam {
-    path: Vec<Position>,
+    posn: Position,
+    prev_posn: Option<Position>,
     cost: u32,
 }
 
@@ -88,44 +89,46 @@ fn generate_bottom_up_vector(img: &RgbImage, energies: &Vec<u32>) -> Vec<Seam> {
 
     // Base case
     for x in 0..img.width() {
-        bottom_up.push(Seam{ path: vec![Position(x, 0)], cost: energies[x as usize] });
+        bottom_up.push(Seam{ posn: Position(x, 0), prev_posn: None, cost: energies[x as usize] });
     }
 
     // Recursive case
     for y in 1..img.height() {
         for x in 0..img.width() {
-            let mut best_seam = &Seam{ path: Vec::new(), cost: u32::MAX };
-
-            for position in get_bottom_up_neighbors(img, x, y) {
-                let seam = &bottom_up[(position.0 + position.1 * img.width()) as usize];
-                if seam.cost < best_seam.cost {
-                    best_seam = seam;
-                }
-            }
-
-            let mut path = best_seam.path.clone(); // inefficient
-            path.push(Position(x, y));
-            let cost = energies[(x + y * img.width()) as usize] + best_seam.cost;
-            bottom_up.push(Seam{ path, cost });
+            let prev_posn = *get_bottom_up_neighbors(img, x, y).iter().min_by_key(|posn| bottom_up[(posn.0 + posn.1 * img.width()) as usize].cost).unwrap();
+            let cost = energies[(x + y * img.width()) as usize] + bottom_up[(prev_posn.0 + prev_posn.1 * img.width()) as usize].cost;
+            bottom_up.push(Seam{ posn: Position(x, y), prev_posn: Some(prev_posn), cost });
         }
     }
 
     bottom_up
 }
 
-fn determine_best_seam(img: &RgbImage, bottom_up: &Vec<Seam>) -> Seam {
+fn determine_best_seam<'a>(img: &RgbImage, bottom_up: &'a Vec<Seam>) -> &'a Seam {
     // Return Seam with lowest cost
-    let seams = &bottom_up[((img.width() * (img.height() - 1)) as usize)..];
-    seams.iter().min_by_key(|seam| seam.cost).unwrap().clone()
+    bottom_up[((img.width() * (img.height() - 1)) as usize)..].iter().min_by_key(|seam| seam.cost).unwrap()
+}
+
+fn seam_to_position_vector(img: &RgbImage, bottom_up: &Vec<Seam>, initial_seam: &Seam) -> Vec<Position> {
+    let mut seam = initial_seam;
+    let mut posn_vector = Vec::new();
+    posn_vector.push(seam.posn);
+    while let Some(prev_posn) = seam.prev_posn {
+        posn_vector.push(prev_posn);
+        seam = &bottom_up[(prev_posn.0 + prev_posn.1 * img.width()) as usize];
+    }
+    posn_vector.reverse();
+    posn_vector
 }
 
 fn cut_seam(old_img: RgbImage, bottom_up: &Vec<Seam>) -> RgbImage {
     // Determine best seam
-    let best_seam = determine_best_seam(&old_img, &bottom_up);
+    let seam = determine_best_seam(&old_img, &bottom_up);
+    let posns_to_remove = seam_to_position_vector(&old_img, &bottom_up, &seam);
 
     // Create new image
     let mut new_img: RgbImage = RgbImage::new(old_img.width() - 1, old_img.height());
-    for (y, posn_to_remove) in (0..old_img.height()).zip(best_seam.path.clone()) {
+    for (y, posn_to_remove) in (0..old_img.height()).zip(posns_to_remove) {
         let mut new_x = 0;
         for old_x in 0..old_img.width() {
             if !(old_x == posn_to_remove.0) {
@@ -289,10 +292,11 @@ mod tests {
         let energies = generate_energies_vector(&img);
         let bottom_up = generate_bottom_up_vector(&img, &energies);
         let seam = determine_best_seam(&img, &bottom_up);
-        assert_eq!(seam.path.len(), 3);
+        let posns_to_remove = seam_to_position_vector(&img, &bottom_up, &seam);
+        assert_eq!(posns_to_remove.len(), 3);
         assert_eq!(seam.cost, 0);
-        assert_eq!(seam.path[0], Position(2, 0));
-        assert_eq!(seam.path[1], Position(2, 1));
-        assert_eq!(seam.path[2], Position(2, 2));
+        assert_eq!(posns_to_remove[0], Position(2, 0));
+        assert_eq!(posns_to_remove[1], Position(2, 1));
+        assert_eq!(posns_to_remove[2], Position(2, 2));
     }
 }

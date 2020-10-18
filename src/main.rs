@@ -1,5 +1,5 @@
-use std::env;
 use std::path::Path;
+use clap::{ Arg, app_from_crate, crate_authors, crate_description, crate_name, crate_version, value_t_or_exit };
 use indicatif::{ ProgressBar, ProgressIterator, ProgressStyle };
 use image;
 use image::RgbImage;
@@ -152,21 +152,33 @@ fn main() {
     println!();
 
     // Parse arguments
-    let args: Vec<String> = env::args().collect();
-    println!("arguments: {:?}", args);
-    let input_file = &args[1];
-    let output_file = &args[2];
-    // TODO error handling
+    let matches = app_from_crate!()
+        .arg(Arg::with_name("percentage")
+            .short("p")
+            .default_value("66")
+            .help("Percentage of image to scrunch"))
+        .arg(Arg::with_name("input_file")
+            .required(true)
+            .help("Input image path"))
+        .arg(Arg::with_name("output_file")
+            .required(true)
+            .help("Output image path"))
+        .get_matches();
+    let input_file = matches.value_of("input_file").unwrap();
+    let output_file = matches.value_of("output_file").unwrap();
+    let percentage = value_t_or_exit!(matches.value_of("percentage"), u32);
 
-    // Load image
+    // Load image and print details
     let mut img = image::open(Path::new(input_file)).unwrap().into_rgb();
-    println!("dimensions: {:?}", img.dimensions());
+    println!("Source Resolution: {} x {} ({} pixels)", img.width(), img.height(), img.width() * img.height());
+    let columns_to_carve = img.width() * percentage / 100;
+    println!("Columns To Carve: {} ({}%)", columns_to_carve, percentage);
+    println!();
 
     // Seam carving
-    let columns_to_carve = img.width() * 2 / 3;
-    let progress_bar = ProgressBar::new(columns_to_carve.into());
+    let progress_bar = ProgressBar::new(columns_to_carve as u64);
     progress_bar.set_style(ProgressStyle::default_bar()
-        .template("[{elapsed}] [{bar:40}] {pos}/{len} ({eta})")
+        .template("[{elapsed_precise}] [{bar:40}] {pos}/{len} ")
         .progress_chars("#>-"));
     for _ in (0..columns_to_carve).progress_with(progress_bar) {
         let energies = generate_energies_vector(&img);

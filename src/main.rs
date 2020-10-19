@@ -1,5 +1,8 @@
+use std::ffi::OsStr;
+use std::fs::File;
 use std::path::Path;
 use clap::{ Arg, app_from_crate, crate_authors, crate_description, crate_name, crate_version, value_t_or_exit };
+use gif;
 use indicatif::{ ProgressBar, ProgressIterator, ProgressStyle };
 use image;
 use image::RgbImage;
@@ -121,8 +124,10 @@ fn seam_to_position_vector(img: &RgbImage, bottom_up: &Vec<Seam>, initial_seam: 
     posn_vector
 }
 
-fn cut_seam(old_img: RgbImage, bottom_up: &Vec<Seam>) -> RgbImage {
+fn cut_seam(old_img: RgbImage) -> RgbImage {
     // Determine best seam
+    let energies = generate_energies_vector(&old_img);
+    let bottom_up = generate_bottom_up_vector(&old_img, &energies);
     let seam = determine_best_seam(&old_img, &bottom_up);
     let posns_to_remove = seam_to_position_vector(&old_img, &bottom_up, &seam);
 
@@ -141,6 +146,58 @@ fn cut_seam(old_img: RgbImage, bottom_up: &Vec<Seam>) -> RgbImage {
     new_img
 }
 
+fn seam_carve_still(mut img: RgbImage, columns_to_carve: u32, output_file: &Path) {
+    // Seam carving
+    let progress_bar = ProgressBar::new(columns_to_carve as u64);
+    progress_bar.set_style(ProgressStyle::default_bar()
+        .template("[{elapsed_precise}] [{bar:40}] {pos}/{len} ")
+        .progress_chars("#>-"));
+    for _ in (0..columns_to_carve).progress_with(progress_bar) {
+        img = cut_seam(img);
+    }
+
+    // Save image
+    img.save(Path::new(output_file)).unwrap();
+}
+
+fn pillarbox(img: &RgbImage, width: u16, height: u16, columns_carved: u32) -> Vec<u8> {
+    let mut pillarboxed_img = vec![0; width as usize * height as usize * 3];
+    let offset = (columns_carved / 2) as usize;
+    for y in 0..height {
+        for x in 0..img.width() {
+            pillarboxed_img[(offset + x as usize + y as usize * width as usize) * 3] = img.get_pixel(x, y as u32).0[0];
+            pillarboxed_img[(offset + x as usize + y as usize * width as usize) * 3 + 1] = img.get_pixel(x, y as u32).0[1];
+            pillarboxed_img[(offset + x as usize + y as usize * width as usize) * 3 + 2] = img.get_pixel(x, y as u32).0[2];
+        }
+    }
+    pillarboxed_img
+}
+
+fn seam_carve_gif(mut img: RgbImage, columns_to_carve: u32, columns_per_frame: u32, output_file: &Path) {
+    // Open gif file
+    let width = img.width() as u16;
+    let height = img.height() as u16;
+    let mut gif_file = File::create(output_file).unwrap();
+    let mut gif_encoder = gif::Encoder::new(&mut gif_file, width, height, &[]).unwrap();
+    let frame = gif::Frame::from_rgb_speed(width, height, img.as_raw(), 10);
+    gif_encoder.set_repeat(gif::Repeat::Infinite).unwrap();
+    gif_encoder.write_frame(&frame).unwrap();
+
+    // Seam carving
+    let progress_bar = ProgressBar::new(columns_to_carve as u64);
+    progress_bar.set_style(ProgressStyle::default_bar()
+        .template("[{elapsed_precise}] [{bar:40}] {pos}/{len} ")
+        .progress_chars("#>-"));
+    for i in (0..columns_to_carve).progress_with(progress_bar) {
+        img = cut_seam(img);
+        if i % columns_per_frame == 0 {
+            // Write frame to gif
+            let frame = gif::Frame::from_rgb_speed(width, height, &pillarbox(&img, width, height, i), 10);
+            gif_encoder.write_frame(&frame).unwrap();
+        }
+    }
+}
+
 fn main() {
     // Print banner
     println!(r"                                  _     _      ");
@@ -157,6 +214,10 @@ fn main() {
             .short("p")
             .default_value("66")
             .help("Percentage of image to scrunch"))
+        .arg(Arg::with_name("columns_per_frame")
+            .short("c")
+            .default_value("1")
+            .help("Columns to carve per frame"))
         .arg(Arg::with_name("input_file")
             .required(true)
             .help("Input image path"))
@@ -164,30 +225,28 @@ fn main() {
             .required(true)
             .help("Output image path"))
         .get_matches();
-    let input_file = matches.value_of("input_file").unwrap();
-    let output_file = matches.value_of("output_file").unwrap();
+    let input_file = Path::new(matches.value_of("input_file").unwrap());
+    let output_file = Path::new(matches.value_of("output_file").unwrap());
     let percentage = value_t_or_exit!(matches.value_of("percentage"), u32);
+    let columns_per_frame = value_t_or_exit!(matches.value_of("columns_per_frame"), u32);
+    let gif_mode = output_file.extension().and_then(OsStr::to_str).unwrap().to_lowercase() == "gif";
 
     // Load image and print details
-    let mut img = image::open(Path::new(input_file)).unwrap().into_rgb();
+    let img = image::open(Path::new(input_file)).unwrap().into_rgb();
     println!("Source Resolution: {} x {} ({} pixels)", img.width(), img.height(), img.width() * img.height());
     let columns_to_carve = img.width() * percentage / 100;
     println!("Columns To Carve: {} ({}%)", columns_to_carve, percentage);
+    if gif_mode {
+        println!("Columns Per Frame: {} ({} columns per frame)", columns_to_carve / columns_per_frame, columns_per_frame);
+    }
     println!();
 
-    // Seam carving
-    let progress_bar = ProgressBar::new(columns_to_carve as u64);
-    progress_bar.set_style(ProgressStyle::default_bar()
-        .template("[{elapsed_precise}] [{bar:40}] {pos}/{len} ")
-        .progress_chars("#>-"));
-    for _ in (0..columns_to_carve).progress_with(progress_bar) {
-        let energies = generate_energies_vector(&img);
-        let bottom_up = generate_bottom_up_vector(&img, &energies);
-        img = cut_seam(img, &bottom_up);
+    // Seam carve depending on whether the output is a gif or a still image
+    if gif_mode {
+        seam_carve_gif(img, columns_to_carve, columns_per_frame, output_file);
+    } else {
+        seam_carve_still(img, columns_to_carve, output_file);
     }
-
-    // Save image
-    img.save(Path::new(output_file)).unwrap();
 }
 
 #[cfg(test)]
